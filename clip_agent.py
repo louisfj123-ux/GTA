@@ -25,6 +25,7 @@ import csv
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -111,7 +112,7 @@ def robust_z(x: np.ndarray) -> np.ndarray:
     if x.size == 0:
         return x
     med = np.median(x)
-    spread = max(np.median(np.abs(x - med)) * 1.4826, 0.25 * x.std())
+    spread = max(np.median(np.abs(x - med)) * 1.4826, x.std())
     if spread < 1e-9:
         return np.zeros_like(x, dtype=float)
     return np.clip((x - med) / spread, -3.0, Z_CAP)
@@ -132,6 +133,24 @@ def shift(x: np.ndarray, seconds: int) -> np.ndarray:
     out = np.zeros_like(x)
     out[: max(0, x.size - seconds)] = x[seconds:]
     return out
+
+
+def ffmpeg_net_args(source: str, headers: dict | None) -> list[str]:
+    """Input options for reading a URL: request headers plus proxy.
+
+    ffmpeg only honours `http_proxy` from the environment, so pass HTTPS_PROXY
+    through explicitly for https sources.
+    """
+    if not source.startswith(("http://", "https://")):
+        return []
+    args = []
+    if headers:
+        args += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
+    proxy = (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+             or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy"))
+    if proxy:
+        args += ["-http_proxy", proxy]
+    return args
 
 
 # --------------------------------------------------------------------------- #
@@ -284,8 +303,7 @@ def load_chat_file(path: Path) -> list[ChatMessage]:
 # --------------------------------------------------------------------------- #
 def _loudness_chunk(source: str, headers: dict | None, start: float | None, length: float | None) -> np.ndarray:
     cmd = [require("ffmpeg"), "-nostdin", "-loglevel", "error"]
-    if headers:
-        cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
+    cmd += ffmpeg_net_args(source, headers)
     if start:
         cmd += ["-ss", f"{start:.2f}"]
     cmd += ["-i", source]
@@ -454,8 +472,7 @@ def build_highlights(
 # --------------------------------------------------------------------------- #
 def cut_clip(source: str, start: float, end: float, dest: Path, headers: dict | None, copy: bool) -> None:
     cmd = [require("ffmpeg"), "-nostdin", "-loglevel", "error", "-y"]
-    if headers:
-        cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
+    cmd += ffmpeg_net_args(source, headers)
     cmd += ["-ss", f"{start:.2f}", "-i", source, "-t", f"{end - start:.2f}"]
     if copy:
         cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
