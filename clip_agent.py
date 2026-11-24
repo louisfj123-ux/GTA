@@ -203,44 +203,67 @@ def _gql(payload: list | dict, retries: int = 4) -> list | dict:
     raise RuntimeError("unreachable")
 
 
-def fetch_chat(vod_id: str, duration: float = 0) -> list[ChatMessage]:
-    """Download the full chat replay for a VOD via Twitch GQL."""
-    msgs: list[ChatMessage] = []
-    cursor = None
-    last_report = 0.0
+def _comments_page(vod_id: str, offset: float | None = None, cursor: str | None = None) -> dict:
+    variables: dict = {"videoID": vod_id}
+    if cursor:
+        variables["cursor"] = cursor
+    else:
+        variables["contentOffsetSeconds"] = int(offset or 0)
+    resp = _gql([{
+        "operationName": "VideoCommentsByOffsetOrCursor",
+        "variables": variables,
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": COMMENTS_QUERY_HASH}},
+    }])
+    item = resp[0] if isinstance(resp, list) else resp
+    if item.get("errors"):
+        raise RuntimeError(f"Twitch GQL error: {item['errors']}")
+    video = (item.get("data") or {}).get("video") or {}
+    return video.get("comments") or {}
+
+
+def _fetch_chat_segment(vod_id: str, seg_start: float, seg_end: float) -> dict[str, ChatMessage]:
+    """Fetch messages with seg_start <= t < seg_end, keyed by message id."""
+    out: dict[str, ChatMessage] = {}
+    comments = _comments_page(vod_id, offset=seg_start)
     while True:
-        variables = {"videoID": vod_id}
-        if cursor:
-            variables["cursor"] = cursor
-        else:
-            variables["contentOffsetSeconds"] = 0
-        resp = _gql([{
-            "operationName": "VideoCommentsByOffsetOrCursor",
-            "variables": variables,
-            "extensions": {"persistedQuery": {"version": 1, "sha256Hash": COMMENTS_QUERY_HASH}},
-        }])
-        item = resp[0] if isinstance(resp, list) else resp
-        if item.get("errors"):
-            raise RuntimeError(f"Twitch GQL error: {item['errors']}")
-        video = (item.get("data") or {}).get("video")
-        if not video or not video.get("comments"):
-            break
-        comments = video["comments"]
         edges = comments.get("edges") or []
+        last_t = seg_start
         for edge in edges:
             node = edge.get("node") or {}
-            frags = (node.get("message") or {}).get("fragments") or []
-            text = "".join(f.get("text", "") for f in frags)
-            msgs.append(ChatMessage(float(node.get("contentOffsetSeconds", 0)), text))
-        if msgs and duration and msgs[-1].t - last_report > 600:
-            last_report = msgs[-1].t
-            log.info("  chat: %s / %s (%d msgs)", hms(msgs[-1].t), hms(duration), len(msgs))
-        if not edges or not (comments.get("pageInfo") or {}).get("hasNextPage"):
-            break
-        cursor = edges[-1].get("cursor")
-        if not cursor:
-            break
-    return msgs
+            t = float(node.get("contentOffsetSeconds", 0))
+            last_t = max(last_t, t)
+            if seg_start <= t < seg_end:
+                frags = (node.get("message") or {}).get("fragments") or []
+                out[node.get("id") or f"{t}:{len(out)}"] = ChatMessage(
+                    t, "".join(f.get("text", "") for f in frags))
+        cursor = edges[-1].get("cursor") if edges else None
+        if last_t >= seg_end or not cursor or not (comments.get("pageInfo") or {}).get("hasNextPage"):
+            return out
+        comments = _comments_page(vod_id, cursor=cursor)
+
+
+def fetch_chat(vod_id: str, duration: float = 0, workers: int = 16, segment: int = 300) -> list[ChatMessage]:
+    """Download the full chat replay for a VOD via Twitch GQL.
+
+    The VOD is split into `segment`-second slices fetched in parallel; each
+    slice starts from its own offset and pages forward with cursors.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if duration <= 0:  # unknown length: fall back to one sequential pass
+        return sorted(_fetch_chat_segment(vod_id, 0, float("inf")).values(), key=lambda m: m.t)
+
+    bounds = [(float(a), float(min(a + segment, duration + 1))) for a in range(0, int(duration) + 1, segment)]
+    merged: dict[str, ChatMessage] = {}
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_fetch_chat_segment, vod_id, a, b) for a, b in bounds]
+        for fut in as_completed(futures):
+            merged.update(fut.result())
+            done += 1
+            if done % max(1, len(bounds) // 10) == 0 or done == len(bounds):
+                log.info("  chat: %d/%d segments, %d msgs", done, len(bounds), len(merged))
+    return sorted(merged.values(), key=lambda m: m.t)
 
 
 def load_chat_file(path: Path) -> list[ChatMessage]:
@@ -259,12 +282,16 @@ def load_chat_file(path: Path) -> list[ChatMessage]:
 # --------------------------------------------------------------------------- #
 # Signals
 # --------------------------------------------------------------------------- #
-def audio_loudness(source: str, headers: dict | None = None) -> np.ndarray:
-    """Per-second RMS loudness in dBFS, streamed through ffmpeg."""
+def _loudness_chunk(source: str, headers: dict | None, start: float | None, length: float | None) -> np.ndarray:
     cmd = [require("ffmpeg"), "-nostdin", "-loglevel", "error"]
     if headers:
         cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
-    cmd += ["-i", source, "-vn", "-ac", "1", "-ar", str(AUDIO_RATE), "-f", "s16le", "-"]
+    if start:
+        cmd += ["-ss", f"{start:.2f}"]
+    cmd += ["-i", source]
+    if length:
+        cmd += ["-t", f"{length:.2f}"]
+    cmd += ["-vn", "-ac", "1", "-ar", str(AUDIO_RATE), "-f", "s16le", "-"]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     chunk_bytes = AUDIO_RATE * 2  # one second of s16 mono
@@ -283,13 +310,38 @@ def audio_loudness(source: str, headers: dict | None = None) -> np.ndarray:
             rms = np.sqrt(np.mean(arr * arr, axis=1))
             values.extend((20 * np.log10(np.maximum(rms, 1e-5))).tolist())
             buf = buf[n * chunk_bytes:]
-            if len(values) % 1800 < 60:
-                log.info("  audio: %s analysed", hms(len(values)))
-    proc.wait()
+    _, err = proc.communicate()
     if proc.returncode != 0 and not values:
-        err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-        raise RuntimeError(f"ffmpeg audio analysis failed: {err.strip()[:500]}")
-    return np.array(values, dtype=float)
+        raise RuntimeError(f"ffmpeg audio analysis failed: {err.decode(errors='replace').strip()[:500]}")
+    out = np.array(values, dtype=float)
+    if length:  # pad/trim so chunks line up exactly when concatenated
+        want = int(round(length))
+        out = np.pad(out, (0, max(0, want - out.size)), constant_values=out.min() if out.size else -100)[:want]
+    return out
+
+
+def audio_loudness(source: str, headers: dict | None = None, duration: float = 0,
+                   workers: int = 8, chunk: int = 1800) -> np.ndarray:
+    """Per-second RMS loudness in dBFS, streamed through ffmpeg.
+
+    Long VODs are split into `chunk`-second pieces analysed in parallel.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if duration <= chunk:
+        return _loudness_chunk(source, headers, None, None)
+    starts = list(range(0, int(math.ceil(duration)), chunk))
+    lengths = [min(chunk, duration - s) for s in starts]
+    results: list[np.ndarray | None] = [None] * len(starts)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(_loudness_chunk, source, headers, s, l): i
+                for i, (s, l) in enumerate(zip(starts, lengths))}
+        done = 0
+        for fut in as_completed(futs):
+            results[futs[fut]] = fut.result()
+            done += 1
+            log.info("  audio: %d/%d chunks", done, len(starts))
+    return np.concatenate(results)
 
 
 def chat_series(msgs: list[ChatMessage], length: int, keywords: list[str]):
@@ -526,7 +578,7 @@ def run(args: argparse.Namespace) -> list[Highlight]:
     if not args.no_audio:
         log.info("Analysing audio loudness ...")
         try:
-            loudness = audio_loudness(audio_src, headers)
+            loudness = audio_loudness(audio_src, headers, meta["duration"])
             log.info("  %s of audio analysed", hms(loudness.size))
         except Exception as e:
             if not msgs:
