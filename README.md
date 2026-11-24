@@ -49,8 +49,26 @@ clips/<channel>/<vod_id>/
 | `--no-chat` / `--no-audio` | | turn off a signal |
 | `--quality` | best | `best`, or a maximum height such as `720p` |
 | `--fast-copy` | off | stream-copy instead of re-encoding |
+| `--logo` | none | image path or URL to overlay on every clip (PNG/WebP transparency is kept) |
+| `--logo-position` | bottom-center | top-left, top-center, top-right, center, bottom-left, bottom-center or bottom-right |
+| `--logo-width` | 0.30 | logo width as a fraction of the video width |
+| `--logo-opacity` | 1.0 | 0 to 1 |
 | `--dry-run` | off | score and write the reports, but don't cut clips |
 | `--output` | `clips` | output root |
+
+### Branding
+
+```bash
+python clip_agent.py --vod <url> --channel <name> --logo https://example.com/logo.webp
+```
+
+To brand clips you've already cut, without cutting them again:
+
+```python
+import clip_agent as c
+from pathlib import Path
+c.brand_clip(Path("clips/x/123/01_00-10-00.mp4"), Path("branded.mp4"), c.LogoSpec(Path("logo.webp")))
+```
 
 ### Offline use
 

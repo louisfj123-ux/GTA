@@ -57,3 +57,11 @@ def test_load_twitchdownloader_format(tmp_path):
     f.write_text('{"comments": [{"content_offset_seconds": 12.5, "message": {"body": "POG"}}]}')
     msgs = ca.load_chat_file(f)
     assert msgs[0].t == 12.5 and msgs[0].text == "POG"
+
+
+def test_logo_filter_positions():
+    from pathlib import Path
+    f = ca.logo_filter(ca.LogoSpec(Path("l.png"), "bottom-center", 0.3, 0.8), 1920)
+    assert "overlay=x='(main_w-overlay_w)/2':y='main_h-overlay_h-main_h*0.03'" in f
+    assert "colorchannelmixer=aa=0.8" in f
+    assert "scale=576:-2" in f

@@ -195,6 +195,7 @@ def resolve_vod(vod_url: str, quality: str) -> dict:
         "duration": float(info.get("duration") or 0),
         "video_url": video["url"],
         "video_height": height(video),
+        "video_width": int(video.get("width") or round(height(video) * 16 / 9)),
         "audio_url": audio["url"],
         "http_headers": video.get("http_headers") or {},
     }
@@ -470,16 +471,98 @@ def build_highlights(
 # --------------------------------------------------------------------------- #
 # Cutting
 # --------------------------------------------------------------------------- #
-def cut_clip(source: str, start: float, end: float, dest: Path, headers: dict | None, copy: bool) -> None:
+# overlay x/y expressions; {m} is the margin in pixels
+_L, _C, _R = "{m}", "(main_w-overlay_w)/2", "main_w-overlay_w-{m}"
+_T, _M, _B = "{m}", "(main_h-overlay_h)/2", "main_h-overlay_h-{m}"
+LOGO_POSITIONS = {
+    "top-left": (_L, _T), "top-center": (_C, _T), "top-right": (_R, _T),
+    "center": (_C, _M),
+    "bottom-left": (_L, _B), "bottom-center": (_C, _B), "bottom-right": (_R, _B),
+}
+
+
+@dataclass
+class LogoSpec:
+    path: Path
+    position: str = "bottom-center"
+    width: float = 0.30     # fraction of video width
+    opacity: float = 1.0
+    margin: float = 0.03    # fraction of video height
+    video_width: int = 0    # filled in once the source is known
+
+
+def logo_filter(spec: LogoSpec, video_width: int) -> str:
+    """filter_complex that scales input 1 to spec.width of the video and overlays it on input 0.
+
+    Width is passed in pixels rather than via scale2ref, whose variable
+    meanings differ between ffmpeg versions.
+    """
+    m = f"main_h*{spec.margin}"
+    x, y = (e.replace("{m}", m) for e in LOGO_POSITIONS[spec.position])
+    w = max(2, int(video_width * spec.width) // 2 * 2)
+    alpha = f",colorchannelmixer=aa={spec.opacity}" if spec.opacity < 1 else ""
+    return (
+        f"[1:v]format=rgba,scale={w}:-2:flags=lanczos{alpha}[lg];"
+        f"[0:v][lg]overlay=x='{x}':y='{y}':format=auto[v]"
+    )
+
+
+def probe_width(path: str) -> int:
+    res = subprocess.run(
+        [require("ffprobe"), "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width", "-of", "csv=p=0", path],
+        capture_output=True, text=True)
+    try:
+        return int(res.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        raise RuntimeError(f"Could not read video width of {path}")
+
+
+def fetch_logo(logo: str, out_dir: Path) -> Path:
+    """Accept a local path or an http(s) URL; returns a local file."""
+    if not logo.startswith(("http://", "https://")):
+        path = Path(logo)
+        if not path.is_file():
+            raise SystemExit(f"Logo not found: {logo}")
+        return path
+    suffix = Path(logo.split("?")[0]).suffix or ".png"
+    dest = out_dir / f"logo{suffix}"
+    if not dest.exists():
+        log.info("Downloading logo ...")
+        req = urllib.request.Request(logo, headers={"User-Agent": "clip_agent"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            dest.write_bytes(resp.read())
+    return dest
+
+
+ENCODE_ARGS = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "160k"]
+
+
+def cut_clip(source: str, start: float, end: float, dest: Path, headers: dict | None,
+             copy: bool, logo: LogoSpec | None = None) -> None:
     cmd = [require("ffmpeg"), "-nostdin", "-loglevel", "error", "-y"]
     cmd += ffmpeg_net_args(source, headers)
-    cmd += ["-ss", f"{start:.2f}", "-i", source, "-t", f"{end - start:.2f}"]
-    if copy:
+    cmd += ["-ss", f"{start:.2f}", "-i", source]
+    if logo:
+        cmd += ["-i", str(logo.path), "-filter_complex", logo_filter(logo, logo.video_width),
+                "-map", "[v]", "-map", "0:a?"]
+    cmd += ["-t", f"{end - start:.2f}"]
+    if copy and not logo:
         cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
     else:
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-c:a", "aac", "-b:a", "160k"]
+        cmd += ENCODE_ARGS
     cmd += ["-movflags", "+faststart", str(dest)]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed for {dest.name}: {res.stderr.strip()[:500]}")
+
+
+def brand_clip(src: Path, dest: Path, logo: LogoSpec) -> None:
+    """Overlay a logo on an already-cut clip."""
+    cmd = [require("ffmpeg"), "-nostdin", "-loglevel", "error", "-y", "-i", str(src),
+           "-i", str(logo.path), "-filter_complex", logo_filter(logo, probe_width(str(src))),
+           "-map", "[v]", "-map", "0:a?", *ENCODE_ARGS[:6], "-c:a", "copy",
+           "-movflags", "+faststart", str(dest)]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(f"ffmpeg failed for {dest.name}: {res.stderr.strip()[:500]}")
@@ -533,6 +616,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     out.add_argument("--output", type=Path, default=Path("clips"), help="Output root (default ./clips)")
     out.add_argument("--quality", default="best", help="'best' or max height like 720p (default best)")
     out.add_argument("--fast-copy", action="store_true", help="Stream-copy instead of re-encoding (faster, less exact cuts)")
+    out.add_argument("--logo", help="Image (path or URL) to overlay on every clip; PNG/WebP transparency is kept")
+    out.add_argument("--logo-position", default="bottom-center", choices=sorted(LOGO_POSITIONS))
+    out.add_argument("--logo-width", type=float, default=0.30, help="Logo width as a fraction of video width (default 0.30)")
+    out.add_argument("--logo-opacity", type=float, default=1.0, help="0-1 (default 1)")
     out.add_argument("--dry-run", action="store_true", help="Score and report only; don't cut clips")
     out.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
@@ -541,6 +628,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         p.error("give --vod or --video-file")
     if args.no_audio and (args.no_chat or not (args.vod or args.chat_file)):
         p.error("nothing to score: audio is disabled and there is no chat source")
+    if not 0 < args.logo_width <= 1 or not 0 <= args.logo_opacity <= 1:
+        p.error("--logo-width must be in (0, 1] and --logo-opacity in [0, 1]")
     if not 0 <= args.lead <= 1:
         p.error("--lead must be between 0 and 1")
     return args
@@ -566,12 +655,20 @@ def run(args: argparse.Namespace) -> list[Highlight]:
                         info["uploader_id"], args.channel)
         video_src, audio_src, headers = info["video_url"], info["audio_url"], info["http_headers"]
         meta = {"id": info["id"] or vod_id, "title": info["title"], "channel": info["uploader_id"] or args.channel,
-                "duration": info["duration"], "video_height": info["video_height"]}
+                "duration": info["duration"], "video_height": info["video_height"],
+                "video_width": info["video_width"]}
         log.info("  '%s' by %s, %s long, cutting at %sp",
                  meta["title"], meta["channel"], hms(meta["duration"]), info["video_height"])
 
     out_dir = args.output / channel / str(meta["id"])
     out_dir.mkdir(parents=True, exist_ok=True)
+    logo = None
+    if args.logo and not args.dry_run:
+        logo = LogoSpec(fetch_logo(args.logo, out_dir), args.logo_position,
+                        args.logo_width, args.logo_opacity)
+        logo.video_width = meta.get("video_width") or probe_width(video_src)
+        if args.fast_copy:
+            log.warning("--logo needs re-encoding; ignoring --fast-copy")
 
     # 2. Chat -----------------------------------------------------------------
     msgs: list[ChatMessage] = []
@@ -631,7 +728,7 @@ def run(args: argparse.Namespace) -> list[Highlight]:
             name = f"{h.rank:02d}_{h.timestamp.replace(':', '-')}.mp4"
             log.info("Cutting #%d  %s-%s  (score %.2f)", h.rank, hms(h.start), hms(h.end), h.score)
             try:
-                cut_clip(video_src, h.start, h.end, out_dir / name, headers, args.fast_copy)
+                cut_clip(video_src, h.start, h.end, out_dir / name, headers, args.fast_copy, logo)
                 h.file = name
             except RuntimeError as e:
                 log.error("  %s", e)
