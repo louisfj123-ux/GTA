@@ -8,6 +8,19 @@ top GTA 6 Twitch clips into 3 ready-to-post TikToks on the delivery page.
 - Tools: `daily_hunt.py` (discover, prepare, render), `daily_page.py` (page state and build).
 - Set `HF_HUB_DISABLE_XET=1` for every command; the speech model downloads on first use.
 
+## 0. Set up (fresh machine)
+
+Scheduled sessions may start without the repository or its tools. Check first:
+
+```bash
+[ -f GTA/daily_hunt.py ] || [ -f daily_hunt.py ] || git clone -b claude/clip-agent-vod-processing-ca11gh https://github.com/louisfj123-ux/GTA
+cd GTA 2>/dev/null || true
+python3 -c "import yt_dlp, faster_whisper, cv2" 2>/dev/null || pip install -q -r requirements.txt
+fc-list | grep -qi montserrat || (apt-get update -q && apt-get install -y -q fonts-montserrat) >/dev/null 2>&1
+```
+
+Run every later command from the repository root.
+
 ## 1. Load yesterday's state
 
 1. Read the delivery page with the Artifact tool (`action: "read"`, the URL above).
@@ -24,6 +37,7 @@ python daily_hunt.py prepare  --work work/<date>
 ```
 
 If discover finds fewer than 4 candidates, run it again with `--period LAST_WEEK`.
+Discover retries Twitch's occasional "service error" by itself; if it still fails, wait a minute and run it again.
 
 ## 3. Review (the judgement step)
 
@@ -46,7 +60,7 @@ For each pick, write an entry in `work/<date>/picks.json`:
 
 ```json
 {"slug": "...", "hook": "Who did that?!", "post_caption": "GTA 6 traffic is undefeated 💀 #gta6 #kaicenat",
- "facecam": [1620, 348, 300, 192], "start": null, "end": null}
+ "facecam": [1620, 348, 300, 192], "cover": null, "start": null, "end": null}
 ```
 
 - `hook`: at most 7 words, sparks curiosity, no emoji (the caption font cannot draw them).
@@ -55,6 +69,10 @@ For each pick, write an entry in `work/<date>/picks.json`:
   cropped correctly on top. If the crop is wrong, measure the box on `grid.jpg`
   (yellow lines every 120 px in 1920×1080 coordinates), or use `null` for the
   blurred-background layout, which is always safe.
+- `cover` (optional, `[x, y, w, h]`): if the stream shows its own live captions
+  (usually white or highlighted words at the bottom centre), measure their area on
+  `grid.jpg` and set `cover` so they are blanked out. Otherwise the video shows two
+  sets of captions. Leave it out when there are none.
 - `start`/`end` (seconds): trim dead air, such as a map or menu at the end.
 
 Fix clear transcription mistakes in the clip's `words.json`, such as names

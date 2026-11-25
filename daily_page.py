@@ -10,7 +10,8 @@ days of clips and the slugs of every clip ever used. Each run:
 
   python daily_page.py build --state state.json --manifest work/final/manifest.json \
       --urls urls.json --date 2026-11-26 --out page.html --keep-days 3
-      Add today's clips (urls.json maps each file name to its uploaded /_blob/ url),
+      Add today's clips (urls.json maps each file name to its uploaded /_blob/ url;
+      a second run on the same date puts its clips first and keeps the earlier ones),
       drop days beyond --keep-days, and write the page. Prints the asset ids of
       dropped days so they can be deleted, and writes history.json for discover.
 """
@@ -56,7 +57,13 @@ def build(args) -> None:
         clips.append({k: m[k] for k in ("n", "file", "title", "streamer", "seconds", "views",
                                         "post_caption", "source_url", "slug")} | {"url": url})
     days = [d for d in state.get("days", []) if d["date"] != args.date]
-    days.insert(0, {"date": args.date, "clips": clips})
+    earlier_today = next((d["clips"] for d in state.get("days", []) if d["date"] == args.date), [])
+    seen = {c["slug"] for c in clips}
+    # A second run on the same day adds its clips after the earlier ones.
+    merged = clips + [c for c in earlier_today if c["slug"] not in seen]
+    for i, c in enumerate(merged, 1):
+        c["n"] = i
+    days.insert(0, {"date": args.date, "clips": merged})
     keep, dropped = days[: args.keep_days], days[args.keep_days:]
     history = list(dict.fromkeys(state.get("history", []) + [c["slug"] for c in clips]))[-2000:]
     now = dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y, %H:%M UTC")

@@ -18,7 +18,8 @@ Three steps, with a human (or Claude) review between prepare and render:
 
   python daily_hunt.py render --work work/2026-11-26 --picks picks.json
       picks.json: [{"slug": ..., "hook": "...", "post_caption": "...",
-                    "facecam": [x,y,w,h] | null, "start": s, "end": s}, ...]
+                    "facecam": [x,y,w,h] | null, "cover": [x,y,w,h] | null,
+                    "start": s, "end": s}, ...]
       Renders each pick as a captioned, branded 9:16 video, compressed to
       fit the delivery page. -> work/final/*.mp4 + work/final/manifest.json
 """
@@ -56,11 +57,16 @@ CLIPS_QUERY = """query($game: String!, $first: Int!, $period: ClipsPeriod!) {
 }"""
 
 
-def gql_query(query: str, variables: dict) -> dict:
-    resp = ca._gql({"query": query, "variables": variables})
-    if resp.get("errors"):
-        raise RuntimeError(f"Twitch GQL error: {resp['errors']}")
-    return resp["data"]
+def gql_query(query: str, variables: dict, attempts: int = 5) -> dict:
+    """Twitch's GQL sometimes answers "service error"; retry with backoff."""
+    import time
+    for i in range(attempts):
+        resp = ca._gql({"query": query, "variables": variables})
+        if not resp.get("errors") and resp.get("data"):
+            return resp["data"]
+        if i == attempts - 1:
+            raise RuntimeError(f"Twitch GQL error: {resp.get('errors')}")
+        time.sleep(3 * 2 ** i)
 
 
 def discover(args) -> None:
@@ -205,6 +211,8 @@ def render(args) -> None:
             argv += ["--facecam", ",".join(str(int(v)) for v in p["facecam"])]
         else:
             argv += ["--fill", "blur"]
+        if p.get("cover"):
+            argv += ["--cover", ",".join(str(int(v)) for v in p["cover"])]
         if p.get("start") is not None:
             argv += ["--start", str(p["start"])]
         if p.get("end") is not None:
