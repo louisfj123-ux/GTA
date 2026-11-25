@@ -16,8 +16,9 @@ python clip_agent.py --vod https://www.twitch.tv/videos/2932568279    # --channe
    - chat messages per second, shifted back by `--chat-delay` because chat reacts late
    - messages containing hype keywords (KEKW, POG, "clip it", LUL, ...)
    - audio loudness
-5. **Pick** the top `--num-clips` peaks, at least `--min-gap` seconds apart and scoring above `--min-score`.
-6. **Cut** each clip with ffmpeg straight from the stream. Clips are re-encoded for exact cuts, or stream-copied with `--fast-copy`.
+5. **Gameplay check**: measures on-screen motion from the lowest-quality stream, so moments spent mostly in menus, pause or loading screens are skipped.
+6. **Pick** the top `--num-clips` peaks, at least `--min-gap` seconds apart and scoring above `--min-score`.
+7. **Cut** each clip with ffmpeg straight from the stream. Clips are re-encoded for exact cuts, or stream-copied with `--fast-copy`.
 
 If the chat download fails, the agent carries on with audio only. If audio fails, it uses chat only.
 
@@ -46,6 +47,7 @@ clips/<channel>/<vod_id>/
 | `--min-score` | 0.5 | drop weak peaks |
 | `--keywords` | built-in list | comma-separated list that replaces the built-in keywords |
 | `--weight-chat` / `--weight-keywords` / `--weight-audio` | 1 / 1 / 0.7 | how much each signal counts |
+| `--min-gameplay` | 0.7 | skip moments where less than this share of the clip is moving gameplay (menus, pause and loading screens are static); 0 turns it off |
 | `--no-chat` / `--no-audio` | | turn off a signal |
 | `--quality` | best | `best`, or a maximum height such as `720p` |
 | `--fast-copy` | off | stream-copy instead of re-encoding |

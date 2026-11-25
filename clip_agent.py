@@ -76,6 +76,7 @@ class Highlight:
     loudness_db: float
     top_words: list[str] = field(default_factory=list)
     file: str | None = None
+    gameplay: float | None = None   # fraction of the clip with on-screen motion
 
     @property
     def timestamp(self) -> str:
@@ -197,6 +198,8 @@ def resolve_vod(vod_url: str, quality: str) -> dict:
         "video_height": height(video),
         "video_width": int(video.get("width") or round(height(video) * 16 / 9)),
         "audio_url": audio["url"],
+        # Smallest video stream is plenty for motion analysis.
+        "motion_url": min(video_formats, key=lambda f: (height(f) or 1e9, f.get("tbr") or 1e9))["url"],
         "http_headers": video.get("http_headers") or {},
     }
 
@@ -361,6 +364,73 @@ def audio_loudness(source: str, headers: dict | None = None, duration: float = 0
             done += 1
             log.info("  audio: %d/%d chunks", done, len(starts))
     return np.concatenate(results)
+
+
+MOTION_W, MOTION_H, MOTION_FPS = 64, 36, 2
+MOTION_PIXEL_DELTA = 12      # grey-level change that counts as "moved"
+GAMEPLAY_THRESHOLD = 0.15    # fraction of pixels moving for a second to count as gameplay
+
+
+def _motion_chunk(source: str, headers: dict | None, start: float | None, length: float | None) -> np.ndarray:
+    """Per-second fraction of pixels that change between frames (tiny greyscale frames)."""
+    cmd = [require("ffmpeg"), "-nostdin", "-loglevel", "error"]
+    cmd += ffmpeg_net_args(source, headers)
+    if start:
+        cmd += ["-ss", f"{start:.2f}"]
+    cmd += ["-i", source]
+    if length:
+        cmd += ["-t", f"{length:.2f}"]
+    cmd += ["-an", "-vf", f"fps={MOTION_FPS},scale={MOTION_W}:{MOTION_H},format=gray",
+            "-f", "rawvideo", "-"]
+    res = subprocess.run(cmd, capture_output=True)
+    frame = MOTION_W * MOTION_H
+    n = len(res.stdout) // frame
+    if res.returncode != 0 and n == 0:
+        raise RuntimeError(f"ffmpeg motion analysis failed: {res.stderr.decode(errors='replace').strip()[:500]}")
+    frames = np.frombuffer(res.stdout[: n * frame], dtype=np.uint8).reshape(n, MOTION_H, MOTION_W).astype(np.int16)
+    if n < 2:
+        diffs = np.zeros(n)
+    else:
+        diffs = (np.abs(np.diff(frames, axis=0)) > MOTION_PIXEL_DELTA).mean(axis=(1, 2))
+        diffs = np.concatenate([[diffs[0]], diffs])
+    secs = int(math.ceil(n / MOTION_FPS))
+    padded = np.pad(diffs, (0, secs * MOTION_FPS - n), mode="edge") if n else np.zeros(0)
+    out = padded.reshape(secs, MOTION_FPS).mean(axis=1) if secs else np.zeros(0)
+    if length:
+        want = int(round(length))
+        out = np.pad(out, (0, max(0, want - out.size)))[:want]
+    return out
+
+
+def video_motion(source: str, headers: dict | None = None, duration: float = 0,
+                 workers: int = 8, chunk: int = 1800) -> np.ndarray:
+    """Per-second motion for the whole VOD, analysed in parallel chunks."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if duration <= chunk:
+        return _motion_chunk(source, headers, None, None)
+    starts = list(range(0, int(math.ceil(duration)), chunk))
+    lengths = [min(chunk, duration - s) for s in starts]
+    results: list[np.ndarray | None] = [None] * len(starts)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(_motion_chunk, source, headers, s, l): i
+                for i, (s, l) in enumerate(zip(starts, lengths))}
+        for done, fut in enumerate(as_completed(futs), 1):
+            results[futs[fut]] = fut.result()
+            log.info("  video: %d/%d chunks", done, len(starts))
+    return np.concatenate(results)
+
+
+def gameplay_fraction(motion: np.ndarray, length: int, clip_len: float, lead: float) -> np.ndarray:
+    """For each candidate peak second, the share of its clip window that is gameplay."""
+    active = np.zeros(length)
+    m = motion[:length] >= GAMEPLAY_THRESHOLD
+    active[: m.size] = m
+    csum = np.concatenate([[0.0], np.cumsum(active)])
+    L = max(1, int(round(clip_len)))
+    starts = np.clip(np.arange(length) - int(round(clip_len * lead)), 0, max(0, length - L))
+    ends = np.minimum(starts + L, length)
+    return (csum[ends] - csum[starts]) / np.maximum(1, ends - starts)
 
 
 def chat_series(msgs: list[ChatMessage], length: int, keywords: list[str]):
@@ -576,12 +646,13 @@ def write_reports(out_dir: Path, meta: dict, highlights: list[Highlight]) -> Non
     with open(out_dir / "highlights.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["rank", "timestamp", "start", "end", "score", "chat_msgs",
-                    "keyword_hits", "loudness_db", "top_words", "file", "vod_link"])
+                    "keyword_hits", "loudness_db", "gameplay", "top_words", "file", "vod_link"])
         for h in highlights:
             link = (f"https://www.twitch.tv/videos/{meta['id']}?t={int(h.start)}s"
                     if str(meta.get("id", "")).isdigit() else "")
             w.writerow([h.rank, h.timestamp, h.start, h.end, h.score, h.chat_msgs,
-                        h.keyword_hits, h.loudness_db, " ".join(h.top_words), h.file or "", link])
+                        h.keyword_hits, h.loudness_db, "" if h.gameplay is None else h.gameplay,
+                        " ".join(h.top_words), h.file or "", link])
 
 
 # --------------------------------------------------------------------------- #
@@ -611,6 +682,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     sel.add_argument("--weight-audio", type=float, default=0.7)
     sel.add_argument("--no-audio", action="store_true", help="Skip audio analysis (chat only)")
     sel.add_argument("--no-chat", action="store_true", help="Skip chat (audio only)")
+    sel.add_argument("--min-gameplay", type=float, default=0.7,
+                     help="Skip moments where less than this share of the clip is moving gameplay "
+                          "(menus, loading and pause screens are static). 0 disables (default 0.7)")
 
     out = p.add_argument_group("output")
     out.add_argument("--output", type=Path, default=Path("clips"), help="Output root (default ./clips)")
@@ -642,7 +716,7 @@ def run(args: argparse.Namespace) -> list[Highlight]:
 
     # 1. Source ---------------------------------------------------------------
     if args.video_file:
-        video_src = audio_src = str(args.video_file)
+        video_src = audio_src = motion_src = str(args.video_file)
         meta = {"id": vod_id or args.video_file.stem, "title": args.video_file.name,
                 "channel": args.channel or "local", "duration": probe_duration(video_src)}
     else:
@@ -653,6 +727,7 @@ def run(args: argparse.Namespace) -> list[Highlight]:
             log.warning("VOD belongs to '%s', not '%s' - continuing anyway",
                         info["uploader_id"], args.channel)
         video_src, audio_src, headers = info["video_url"], info["audio_url"], info["http_headers"]
+        motion_src = info["motion_url"]
         meta = {"id": info["id"] or vod_id, "title": info["title"], "channel": info["uploader_id"] or args.channel,
                 "duration": info["duration"], "video_height": info["video_height"],
                 "video_width": info["video_width"]}
@@ -705,6 +780,17 @@ def run(args: argparse.Namespace) -> list[Highlight]:
     if length <= 0:
         raise SystemExit("Could not determine VOD duration")
 
+    gameplay = None
+    if args.min_gameplay > 0:
+        log.info("Analysing on-screen motion (to skip menus and loading screens) ...")
+        try:
+            motion = video_motion(motion_src, headers, duration)
+            gameplay = gameplay_fraction(motion, length, args.clip_length, args.lead)
+            log.info("  %.0f%% of the VOD looks like gameplay",
+                     100 * float((motion[:length] >= GAMEPLAY_THRESHOLD).mean()))
+        except Exception as e:
+            log.warning("Motion analysis failed (%s); not filtering for gameplay", e)
+
     # 4. Score ----------------------------------------------------------------
     keywords = [k.strip().lower() for k in args.keywords.split(",")] if args.keywords else DEFAULT_KEYWORDS
     counts = hits = None
@@ -715,12 +801,21 @@ def run(args: argparse.Namespace) -> list[Highlight]:
     score = combined_score(length, counts, hits, loudness, args, window)
 
     edge = args.skip_edges if length > 4 * args.skip_edges else 0
-    peaks = [p for p in pick_peaks(score, args.num_clips, int(args.min_gap), edge)
+    pick_from = score
+    if gameplay is not None:
+        pick_from = np.where(gameplay >= args.min_gameplay, score, -np.inf)
+        if not np.isfinite(pick_from).any():
+            log.warning("No moment has %.0f%% gameplay; ignoring --min-gameplay", 100 * args.min_gameplay)
+            pick_from = score
+    peaks = [p for p in pick_peaks(pick_from, args.num_clips, int(args.min_gap), edge)
              if score[p] >= args.min_score]
     if not peaks:
         log.warning("No moment scored above --min-score %.2f", args.min_score)
     highlights = build_highlights(peaks, score, duration, args.clip_length, args.lead,
                                   counts, hits, words_by_sec, loudness, args.chat_delay)
+    if gameplay is not None:
+        for h in highlights:
+            h.gameplay = round(float(gameplay[int(h.peak)]), 2)
 
     # 5. Cut ------------------------------------------------------------------
     if not args.dry_run:
@@ -737,10 +832,11 @@ def run(args: argparse.Namespace) -> list[Highlight]:
 
     # 6. Summary --------------------------------------------------------------
     print(f"\n{len(highlights)} highlights for {meta['channel']} - {meta['title']}")
-    print(f"{'#':>3}  {'time':8}  {'score':>6}  {'chat':>5}  {'hype':>5}  {'dB':>6}  words")
+    print(f"{'#':>3}  {'time':8}  {'score':>6}  {'chat':>5}  {'hype':>5}  {'dB':>6}  {'game':>5}  words")
     for h in highlights:
         print(f"{h.rank:>3}  {h.timestamp:8}  {h.score:6.2f}  {h.chat_msgs:5d}  {h.keyword_hits:5d}  "
-              f"{h.loudness_db:6.1f}  {' '.join(h.top_words)}")
+              f"{h.loudness_db:6.1f}  {'' if h.gameplay is None else format(h.gameplay, '.0%'):>5}  "
+              f"{' '.join(h.top_words)}")
     print(f"\nOutput: {out_dir.resolve()}")
     return highlights
 

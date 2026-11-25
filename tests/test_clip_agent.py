@@ -65,3 +65,12 @@ def test_logo_filter_positions():
     assert "overlay=x='(main_w-overlay_w)/2':y='main_h-overlay_h-main_h*0.03'" in f
     assert "colorchannelmixer=aa=0.8" in f
     assert "scale=576:-2" in f
+
+
+def test_gameplay_fraction_windows():
+    motion = np.zeros(200)
+    motion[100:140] = 0.5            # 40 s of gameplay
+    g = ca.gameplay_fraction(motion, 200, clip_len=20, lead=0.5)
+    assert g[120] == 1.0             # window 110-130, all gameplay
+    assert g[30] == 0.0              # window 20-40, menu
+    assert g[100] == 0.5             # window 90-110, half and half
