@@ -81,6 +81,20 @@ python clip_agent.py --video-file stream.mp4 --chat-file chat.json --channel me
 
 `--chat-file` accepts this tool's own `chat.json` (`[{"t": 12.3, "text": "..."}]`) or a TwitchDownloader JSON export.
 
+## Captioned clips (`caption_clip.py`)
+
+Turns a Twitch clip, or any video, into a captioned clip with the logo, using bold word-by-word captions in the short-form style.
+
+```bash
+python caption_clip.py --clip https://www.twitch.tv/<channel>/clip/<slug> \
+    --logo logo.webp --logo-position top-right --cover 500,940,920,130
+```
+
+- The clip is transcribed with faster-whisper (`--model`, default `medium.en`). The words and their timings are saved to `clips/captioned/<id>.words.json`.
+- Whisper can mishear shouting. Fix the words in that file and re-run with `--words <file>` to re-render without transcribing again. Add `"break": true` to a word to start a new caption line there.
+- `--cover x,y,w,h` blanks out burned-in captions, such as a streamer's live captions, so the video doesn't show two sets.
+- Captions use Montserrat Black. Install it with `apt-get install fonts-montserrat`; without it, a fallback font is used.
+
 ## Network
 
 The agent needs to reach `www.twitch.tv`, `gql.twitch.tv`, `usher.ttvnw.net` and Twitch's VOD CDN hosts (`*.cloudfront.net` / `*.ttvnw.net`).
