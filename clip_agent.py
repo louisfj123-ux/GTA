@@ -52,6 +52,22 @@ DEFAULT_KEYWORDS = [
     "lol", "haha", "😂", "💀", "!!!", "???",
 ]
 
+# Rage: chat telling him to calm down, mirroring his screaming ("NOOOO"),
+# or spamming NotLikeThis. Entries starting with "re:" are regular expressions.
+RAGE_KEYWORDS = [
+    r"re:\bno{3,}\b", "notlikethis", "chill", "calm down", "mad", "he mad", "bro is mad",
+    "tweaking", "tweakin", "tweak", "crash out", "crashing out", "crashout", "bark", "barking",
+    "rage", "raging", "angry", "tight", "malding", "screaming", "yelling", "throw", "threw",
+    "controller", "monitor", "broke", "broken", "biblethump", "💀",
+]
+
+STYLES = {
+    # weights: (chat volume, keywords, audio); relative_audio scores loudness
+    # against the streamer's recent baseline so sudden yelling stands out.
+    "hype": {"keywords": DEFAULT_KEYWORDS, "weights": (1.0, 1.0, 0.7), "relative_audio": False},
+    "rage": {"keywords": RAGE_KEYWORDS, "weights": (0.3, 1.5, 1.0), "relative_audio": True},
+}
+
 AUDIO_RATE = 8000  # Hz; plenty for loudness and keeps the pipe small.
 
 
@@ -437,8 +453,10 @@ def chat_series(msgs: list[ChatMessage], length: int, keywords: list[str]):
     counts = np.zeros(length)
     hits = np.zeros(length)
     words_by_sec: dict[int, list[str]] = {}
-    kw_single = {k for k in keywords if " " not in k and k.isalnum()}
-    kw_phrase = [k for k in keywords if k not in kw_single]
+    kw_regex = [(k[3:], re.compile(k[3:])) for k in keywords if k.startswith("re:")]
+    plain = [k for k in keywords if not k.startswith("re:")]
+    kw_single = {k for k in plain if " " not in k and k.isalnum()}
+    kw_phrase = [k for k in plain if k not in kw_single]
     for m in msgs:
         s = int(m.t)
         if not 0 <= s < length:
@@ -447,10 +465,33 @@ def chat_series(msgs: list[ChatMessage], length: int, keywords: list[str]):
         low = m.text.lower()
         tokens = re.findall(r"\w+", low)
         matched = [t for t in tokens if t in kw_single] + [p for p in kw_phrase if p in low]
+        for _, rx in kw_regex:
+            mm = rx.search(low)
+            if mm:
+                matched.append(re.sub(r"(.)\1{2,}", r"\1\1\1", mm.group(0)))
         if matched:
             hits[s] += 1
             words_by_sec.setdefault(s, []).extend(matched)
     return counts, hits, words_by_sec
+
+
+def relative_loudness(loudness: np.ndarray, window: int = 300, silence_db: float = -60) -> np.ndarray:
+    """Loudness minus a rolling median baseline, so yelling stands out in quiet and loud scenes alike.
+
+    Muted stretches (Twitch mutes copyrighted audio) are treated as baseline.
+    """
+    x = loudness.astype(float).copy()
+    voiced = x > silence_db
+    if not voiced.any():
+        return np.zeros_like(x)
+    x[~voiced] = np.median(x[voiced])
+    block = 30
+    n = int(math.ceil(x.size / block))
+    meds = np.array([np.median(x[i * block:(i + 1) * block]) for i in range(n)])
+    k = max(1, window // block)
+    base_blocks = np.array([np.median(meds[max(0, i - k // 2): i + k // 2 + 1]) for i in range(n)])
+    base = np.repeat(base_blocks, block)[: x.size]
+    return np.where(voiced, x - base, 0.0)
 
 
 def score_series(
@@ -676,10 +717,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     sel.add_argument("--skip-edges", type=int, default=60, help="Ignore the first/last N seconds (default 60)")
     sel.add_argument("--min-score", type=float, default=0.5,
                      help="Drop peaks scoring below this (combined z-score, default 0.5)")
-    sel.add_argument("--keywords", help="Comma-separated hype keywords (replaces the defaults)")
-    sel.add_argument("--weight-chat", type=float, default=1.0)
-    sel.add_argument("--weight-keywords", type=float, default=1.0)
-    sel.add_argument("--weight-audio", type=float, default=0.7)
+    sel.add_argument("--style", choices=sorted(STYLES), default="hype",
+                     help="What to look for: 'hype' (big chat reactions) or 'rage' (streamer losing it)")
+    sel.add_argument("--keywords", help="Comma-separated keywords (replaces the style's list; prefix re: for regex)")
+    sel.add_argument("--weight-chat", type=float, help="Weight of chat volume (default from --style)")
+    sel.add_argument("--weight-keywords", type=float, help="Weight of keyword hits (default from --style)")
+    sel.add_argument("--weight-audio", type=float, help="Weight of loudness (default from --style)")
     sel.add_argument("--no-audio", action="store_true", help="Skip audio analysis (chat only)")
     sel.add_argument("--no-chat", action="store_true", help="Skip chat (audio only)")
     sel.add_argument("--min-gameplay", type=float, default=0.7,
@@ -697,6 +740,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     out.add_argument("--dry-run", action="store_true", help="Score and report only; don't cut clips")
     out.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
+    style = STYLES[args.style]
+    for name, default in zip(("weight_chat", "weight_keywords", "weight_audio"), style["weights"]):
+        if getattr(args, name) is None:
+            setattr(args, name, default)
+    args.relative_audio = style["relative_audio"]
 
     if not args.vod and not args.video_file:
         p.error("give --vod or --video-file")
@@ -792,7 +840,8 @@ def run(args: argparse.Namespace) -> list[Highlight]:
             log.warning("Motion analysis failed (%s); not filtering for gameplay", e)
 
     # 4. Score ----------------------------------------------------------------
-    keywords = [k.strip().lower() for k in args.keywords.split(",")] if args.keywords else DEFAULT_KEYWORDS
+    keywords = ([k.strip() if k.strip().startswith("re:") else k.strip().lower() for k in args.keywords.split(",")]
+                if args.keywords else STYLES[args.style]["keywords"])
     counts = hits = None
     words_by_sec: dict[int, list[str]] = {}
     if msgs:
@@ -851,7 +900,8 @@ def combined_score(length, counts, hits, loudness, args, window) -> np.ndarray:
                               args.weight_chat, args.weight_keywords, 0)[:length]
         used = True
     if loudness is not None and loudness.size and args.weight_audio > 0:
-        total += score_series(length, None, None, loudness, 0, window, 0, 0, args.weight_audio)
+        loud = relative_loudness(loudness) if getattr(args, "relative_audio", False) else loudness
+        total += score_series(length, None, None, loud, 0, window, 0, 0, args.weight_audio)
         used = True
     if not used:
         raise SystemExit("No usable signal (no chat and no audio) - nothing to score")

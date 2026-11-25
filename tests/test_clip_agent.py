@@ -74,3 +74,20 @@ def test_gameplay_fraction_windows():
     assert g[120] == 1.0             # window 110-130, all gameplay
     assert g[30] == 0.0              # window 20-40, menu
     assert g[100] == 0.5             # window 90-110, half and half
+
+
+def test_rage_keywords_match_nooo_and_phrases():
+    msgs = [ca.ChatMessage(0.5, "NOOOOOOOOO"), ca.ChatMessage(1.5, "bro calm down"),
+            ca.ChatMessage(2.5, "no way"), ca.ChatMessage(3.5, "NotLikeThis NotLikeThis")]
+    counts, hits, words = ca.chat_series(msgs, 5, ca.RAGE_KEYWORDS)
+    assert hits.tolist() == [1, 1, 0, 1, 0]
+    assert words[0] == ["nooo"] and words[1] == ["calm down"]
+
+
+def test_relative_loudness_ignores_muted_and_tracks_baseline():
+    x = np.full(600, -30.0)
+    x[100:200] = -100.0          # muted section
+    x[400:405] = -10.0           # yelling
+    r = ca.relative_loudness(x)
+    assert np.all(r[100:200] == 0)
+    assert r[402] > 15 and abs(r[300]) < 1

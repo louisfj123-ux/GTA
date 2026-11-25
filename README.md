@@ -45,8 +45,9 @@ clips/<channel>/<vod_id>/
 | `--chat-delay` | 6 | how many seconds chat lags behind the stream |
 | `--skip-edges` | 60 | ignore the first and last N seconds (intro and outro) |
 | `--min-score` | 0.5 | drop weak peaks |
+| `--style` | hype | `hype` finds big chat reactions. `rage` finds the streamer losing it: chat telling him to chill or calm down, "NOOOO" spam, NotLikeThis, and yelling that is loud compared with his recent baseline |
 | `--keywords` | built-in list | comma-separated list that replaces the built-in keywords |
-| `--weight-chat` / `--weight-keywords` / `--weight-audio` | 1 / 1 / 0.7 | how much each signal counts |
+| `--weight-chat` / `--weight-keywords` / `--weight-audio` | set by `--style` (hype: 1 / 1 / 0.7; rage: 0.3 / 1.5 / 1) | how much each signal counts |
 | `--min-gameplay` | 0.7 | skip moments where less than this share of the clip is moving gameplay (menus, pause and loading screens are static); 0 turns it off |
 | `--no-chat` / `--no-audio` | | turn off a signal |
 | `--quality` | best | `best`, or a maximum height such as `720p` |
