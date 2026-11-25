@@ -4,7 +4,7 @@ Finds the best moments in a Twitch VOD and cuts them into clips.
 
 ```bash
 pip install -r requirements.txt      # also needs ffmpeg on PATH
-python clip_agent.py --vod https://www.twitch.tv/videos/2932568279 --channel streamername
+python clip_agent.py --vod https://www.twitch.tv/videos/2932568279    # --channel is optional
 ```
 
 ## How it works

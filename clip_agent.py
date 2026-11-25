@@ -591,7 +591,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Find and cut highlight clips from a Twitch VOD.")
     src = p.add_argument_group("source")
     src.add_argument("--vod", help="Twitch VOD url or id, e.g. https://www.twitch.tv/videos/123")
-    src.add_argument("--channel", required=True, help="Channel name (used for output folder and a sanity check)")
+    src.add_argument("--channel", help="Channel name for the output folder; defaults to the VOD's channel")
     src.add_argument("--video-file", type=Path, help="Use a local video file instead of streaming the VOD")
     src.add_argument("--chat-file", type=Path, help="Use a saved chat JSON instead of downloading it")
     src.add_argument("--save-chat", action="store_true", help="Save downloaded chat to chat.json in the output folder")
@@ -637,7 +637,6 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def run(args: argparse.Namespace) -> list[Highlight]:
     require("ffmpeg")
-    channel = re.sub(r"[^\w.-]", "_", args.channel.lower())
     vod_id = parse_vod_id(args.vod) if args.vod else None
     headers: dict = {}
 
@@ -645,12 +644,12 @@ def run(args: argparse.Namespace) -> list[Highlight]:
     if args.video_file:
         video_src = audio_src = str(args.video_file)
         meta = {"id": vod_id or args.video_file.stem, "title": args.video_file.name,
-                "channel": args.channel, "duration": probe_duration(video_src)}
+                "channel": args.channel or "local", "duration": probe_duration(video_src)}
     else:
         url = args.vod if args.vod.startswith("http") else f"https://www.twitch.tv/videos/{vod_id}"
         log.info("Resolving VOD %s ...", vod_id)
         info = resolve_vod(url, args.quality)
-        if info["uploader_id"] and info["uploader_id"].lower() != args.channel.lower():
+        if args.channel and info["uploader_id"] and info["uploader_id"].lower() != args.channel.lower():
             log.warning("VOD belongs to '%s', not '%s' - continuing anyway",
                         info["uploader_id"], args.channel)
         video_src, audio_src, headers = info["video_url"], info["audio_url"], info["http_headers"]
@@ -660,6 +659,7 @@ def run(args: argparse.Namespace) -> list[Highlight]:
         log.info("  '%s' by %s, %s long, cutting at %sp",
                  meta["title"], meta["channel"], hms(meta["duration"]), info["video_height"])
 
+    channel = re.sub(r"[^\w.-]", "_", (args.channel or meta["channel"] or "unknown").lower())
     out_dir = args.output / channel / str(meta["id"])
     out_dir.mkdir(parents=True, exist_ok=True)
     logo = None
