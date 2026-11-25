@@ -45,9 +45,10 @@ clips/<channel>/<vod_id>/
 | `--chat-delay` | 6 | how many seconds chat lags behind the stream |
 | `--skip-edges` | 60 | ignore the first and last N seconds (intro and outro) |
 | `--min-score` | 0.5 | drop weak peaks |
-| `--style` | hype | `hype` finds big chat reactions. `rage` finds the streamer losing it: chat telling him to chill or calm down, "NOOOO" spam, NotLikeThis, and yelling that is loud compared with his recent baseline |
+| `--style` | hype | `funny` finds chat laughing (LOL, LMAO, 😂, 💀, KEKW) rather than cheering. `hype` finds big chat reactions. `rage` finds the streamer losing it: chat telling him to chill or calm down, "NOOOO" spam, NotLikeThis, and yelling that is loud compared with his recent baseline |
 | `--keywords` | built-in list | comma-separated list that replaces the built-in keywords |
 | `--weight-chat` / `--weight-keywords` / `--weight-audio` | set by `--style` (hype: 1 / 1 / 0.7; rage: 0.3 / 1.5 / 1) | how much each signal counts |
+| `--max-muted` | 0.1 | skip moments where more than this share of the audio was muted by Twitch for copyright |
 | `--min-gameplay` | 0.7 | skip moments where less than this share of the clip is moving gameplay (menus, pause and loading screens are static); 0 turns it off |
 | `--no-chat` / `--no-audio` | | turn off a signal |
 | `--quality` | best | `best`, or a maximum height such as `720p` |
@@ -92,8 +93,19 @@ python caption_clip.py --clip https://www.twitch.tv/<channel>/clip/<slug> \
 
 - The clip is transcribed with faster-whisper (`--model`, default `medium.en`). The words and their timings are saved to `clips/captioned/<id>.words.json`.
 - Whisper can mishear shouting. Fix the words in that file and re-run with `--words <file>` to re-render without transcribing again. Add `"break": true` to a word to start a new caption line there.
+- `--vertical --facecam x,y,w,h` makes a 9:16 TikTok/Shorts video: the facecam (given in 1920×1080 source pixels) across the top, the gameplay below, and captions in the upper middle, clear of TikTok's buttons and description.
+- `--hook "text"` adds a boxed title. `--start`/`--end` trim the clip. `--censor` stars out swearing and slurs in the captions; the audio is unchanged.
 - `--cover x,y,w,h` blanks out burned-in captions, such as a streamer's live captions, so the video doesn't show two sets.
 - Captions use Montserrat Black. Install it with `apt-get install fonts-montserrat`; without it, a fallback font is used.
+
+Example TikTok render:
+
+```bash
+python caption_clip.py --video clip.mp4 --start 13 --end 40 --vertical --facecam 0,432,392,220 \
+    --hook "Asked a stranger to take our picture..." --censor --logo logo.webp --logo-position top-right
+```
+
+Analysis results are cached in `signals.npz` in each VOD's output folder, so re-running `clip_agent.py` with different settings skips the slow audio and video passes.
 
 ## Network
 

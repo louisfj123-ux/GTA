@@ -71,11 +71,27 @@ def transcribe(video: Path, model_name: str) -> list[dict]:
     return words
 
 
+# On-screen text with swearing or slurs gets reach-limited on TikTok; the audio is untouched.
+CENSOR = re.compile(r"\b(nigg\w*|f+u+c+k\w*|motherf\w*|sh+i+t\w*|b+i+t+c+h\w*|a+ss+hole\w*|d+i+c+k\w*|p+u+s+s+y\w*|h+o+e+s?)\b",
+                    re.IGNORECASE)
+
+
+def censor(word: str) -> str:
+    def stars(m: re.Match) -> str:
+        w = m.group(0)
+        if w.lower().startswith("nigg"):
+            return "N" + "*" * (len(w) - 1)
+        return w[0] + "*" * (len(w) - 2) + w[-1] if len(w) > 2 else w[0] + "*"
+    return CENSOR.sub(stars, word)
+
+
 def chunk_words(words: list[dict], max_words: int, max_gap: float) -> list[list[dict]]:
     """Group words into short caption lines, breaking on pauses and punctuation."""
     chunks: list[list[dict]] = []
     for w in words:
-        if (not chunks or w.get("break") or len(chunks[-1]) >= max_words
+        # Whisper capitalises sentence starts, so a capital (other than I/I'm) starts a new line.
+        new_sentence = w["word"][:1].isupper() and not re.match(r"^I('|$|\b)", w["word"])
+        if (not chunks or w.get("break") or new_sentence or len(chunks[-1]) >= max_words
                 or w["start"] - chunks[-1][-1]["end"] > max_gap
                 or re.search(r"[.!?]$", chunks[-1][-1]["word"])):
             chunks.append([w])
@@ -95,10 +111,21 @@ def ass_escape(text: str) -> str:
 
 
 def build_ass(words: list[dict], width: int, height: int, duration: float,
-              max_words: int = 3, max_gap: float = 0.35, hold: float = 0.6, upper: bool = True) -> str:
-    size = int(height * STYLE["size"])
-    outline = max(2, int(height * STYLE["outline_w"]))
-    margin_v = int(height * STYLE["margin_v"])
+              max_words: int = 3, max_gap: float = 0.35, hold: float = 0.6, upper: bool = True,
+              caption_bottom: float | None = None, hook: str | None = None, hook_y: int | None = None,
+              censor_words: bool = False) -> str:
+    """ASS subtitles: word-highlighted captions, plus an optional boxed hook title.
+
+    caption_bottom is where the bottom of the caption line sits, as a fraction of
+    the height (default 1 - STYLE['margin_v']).
+    """
+    base = min(width, height)   # keeps text the same size in 16:9 and 9:16
+    size = int(base * STYLE["size"])
+    outline = max(2, int(base * STYLE["outline_w"]))
+    if caption_bottom is None:
+        caption_bottom = 1 - STYLE["margin_v"]
+    margin_v = int(height * (1 - caption_bottom))
+    hook_size = int(base * 0.062)
     head = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -109,16 +136,22 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cap,{STYLE['font']},{size},{STYLE['primary']},{STYLE['primary']},{STYLE['outline']},&H80000000,0,0,0,0,100,100,1,0,1,{outline},{max(1, outline // 2)},2,60,60,{margin_v},1
+Style: Hook,{STYLE['font']},{hook_size},&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,3,{int(hook_size * 0.28)},0,5,60,60,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = []
+    if hook:
+        y = hook_y if hook_y is not None else int(height * 0.12)
+        lines.append(f"Dialogue: 1,{ass_time(0)},{ass_time(duration)},Hook,,0,0,0,,"
+                     f"{{\\pos({width // 2},{y})}}{ass_escape(hook.upper())}")
     chunks = chunk_words(words, max_words, max_gap)
     for ci, chunk in enumerate(chunks):
         next_start = chunks[ci + 1][0]["start"] if ci + 1 < len(chunks) else duration
         chunk_end = min(next_start, chunk[-1]["end"] + hold)
-        texts = [ass_escape(w["word"].upper() if upper else w["word"]) for w in chunk]
+        texts = [ass_escape((censor(w["word"]) if censor_words else w["word"]).upper() if upper
+                            else (censor(w["word"]) if censor_words else w["word"])) for w in chunk]
         for wi, w in enumerate(chunk):
             start = chunk[0]["start"] if wi == 0 else w["start"]
             end = chunk[wi + 1]["start"] if wi + 1 < len(chunk) else chunk_end
@@ -140,8 +173,38 @@ def probe(video: Path) -> tuple[int, int, float]:
     return int(d["streams"][0]["width"]), int(d["streams"][0]["height"]), float(d["format"]["duration"])
 
 
+VERTICAL_W, VERTICAL_H = 1080, 1920
+
+
+def vertical_layout(facecam: tuple[int, int, int, int] | None, game_x: float = 0.5,
+                    bars: int = 60) -> tuple[str, int]:
+    """Filter turning a 1920x1080 input [0:v] into 1080x1920 [stack]: facecam on top, gameplay below.
+
+    Returns the filter and the y of the seam between the two panels.
+    """
+    W, H = VERTICAL_W, VERTICAL_H
+    if facecam:
+        fx, fy, fw, fh = facecam
+        cam_h = int(round(W * fh / fw / 2)) * 2
+        game_h = H - cam_h
+        # Trim `bars` px top and bottom: cutscenes are letterboxed.
+        gh = 1080 - 2 * bars
+        cw = int(round(gh * W / game_h / 2)) * 2
+        cx = int(round((1920 - cw) * game_x))
+        f = (f"[0:v]scale=1920:1080,setsar=1,split[a][b];"
+             f"[a]crop={fw}:{fh}:{fx}:{fy},scale={W}:{cam_h}:flags=lanczos[cam];"
+             f"[b]crop={cw}:{gh}:{cx}:{bars},scale={W}:{game_h}:flags=lanczos[game];"
+             f"[cam][game]vstack[stack]")
+        return f, cam_h
+    # No facecam: gameplay crop filling the frame.
+    cw = int(round(1080 * W / H / 2)) * 2
+    cx = int(round((1920 - cw) * game_x))
+    return f"[0:v]scale=1920:1080,setsar=1,crop={cw}:1080:{cx}:0,scale={W}:{H}:flags=lanczos[stack]", 0
+
+
 def render(video: Path, ass_path: Path, dest: Path, logo: ca.LogoSpec | None,
-           cover: tuple[int, int, int, int] | None) -> None:
+           cover: tuple[int, int, int, int] | None, layout: str | None = None) -> None:
+    """Burn subtitles (and logo). `layout` is a filter producing [stack] from [0:v] (vertical mode)."""
     vf = []
     if cover:
         x, y, w, h = cover
@@ -150,13 +213,18 @@ def render(video: Path, ass_path: Path, dest: Path, logo: ca.LogoSpec | None,
     esc = str(ass_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     vf.append(f"ass='{esc}'")
     cmd = [ca.require("ffmpeg"), "-nostdin", "-loglevel", "error", "-y", "-i", str(video)]
+    if layout:
+        # cover (stream captions) applies to the source before the re-layout
+        pre = f"[0:v]{vf[0]}[src];" if cover else ""
+        graph = pre + layout.replace("[0:v]", "[src]" if cover else "[0:v]") + f";[stack]{vf[-1]}[sub]"
+    else:
+        graph = f"[0:v]{','.join(vf)}[sub]"
     if logo:
         logo_fc = ca.logo_filter(logo, logo.video_width)  # uses [0:v] and [1:v], outputs [v]
-        cmd += ["-i", str(logo.path), "-filter_complex",
-                f"[0:v]{','.join(vf)}[sub];" + logo_fc.replace("[0:v]", "[sub]"),
+        cmd += ["-i", str(logo.path), "-filter_complex", graph + ";" + logo_fc.replace("[0:v]", "[sub]"),
                 "-map", "[v]", "-map", "0:a?"]
     else:
-        cmd += ["-vf", ",".join(vf)]
+        cmd += ["-filter_complex", graph, "-map", "[sub]", "-map", "0:a?"]
     cmd += [*ca.ENCODE_ARGS, "-movflags", "+faststart", str(dest)]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
@@ -173,6 +241,14 @@ def main(argv=None) -> int:
     p.add_argument("--model", default="medium.en", help="faster-whisper model (default medium.en)")
     p.add_argument("--max-words", type=int, default=3, help="Words per caption line (default 3)")
     p.add_argument("--cover", help="x,y,w,h of burned-in captions to blank out (e.g. a stream's live captions)")
+    p.add_argument("--start", type=float, help="Trim: start time in seconds")
+    p.add_argument("--end", type=float, help="Trim: end time in seconds")
+    p.add_argument("--vertical", action="store_true", help="9:16 TikTok/Shorts layout (1080x1920)")
+    p.add_argument("--facecam", help="x,y,w,h of the facecam in the 1920x1080 source; placed on top in --vertical")
+    p.add_argument("--game-x", type=float, default=0.5, help="Horizontal centre of the gameplay crop, 0-1 (default 0.5)")
+    p.add_argument("--hook", help="Title text shown in a box for the whole clip (e.g. 'Kai got kicked out the club')")
+    p.add_argument("--name", help="Output file name (without .mp4)")
+    p.add_argument("--censor", action="store_true", help="Star out swearing and slurs in the captions (audio unchanged)")
     p.add_argument("--logo", help="Logo image path or URL")
     p.add_argument("--logo-position", default="top-right", choices=sorted(ca.LOGO_POSITIONS))
     p.add_argument("--logo-width", type=float, default=0.30)
@@ -188,8 +264,20 @@ def main(argv=None) -> int:
         video = download_clip(args.clip, args.output / "source")
     else:
         video = args.video
+    if args.start is not None or args.end is not None:
+        trimmed = args.output / "source" / f"{video.stem}_{args.start or 0:g}-{args.end or 0:g}.mp4"
+        trimmed.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [ca.require("ffmpeg"), "-nostdin", "-loglevel", "error", "-y"]
+        if args.start:
+            cmd += ["-ss", f"{args.start}"]
+        cmd += ["-i", str(video)]
+        if args.end:
+            cmd += ["-t", f"{args.end - (args.start or 0)}"]
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-c:a", "aac", "-b:a", "192k", str(trimmed)]
+        subprocess.run(cmd, check=True)
+        video = trimmed
     width, height, duration = probe(video)
-    stem = video.stem
+    stem = args.name or video.stem
 
     words_path = args.words or args.output / f"{stem}.words.json"
     if args.words:
@@ -200,17 +288,31 @@ def main(argv=None) -> int:
         words_path.write_text(json.dumps(words, indent=1, ensure_ascii=False), encoding="utf-8")
         log.info("  %d words -> %s (edit and re-run with --words to fix mistakes)", len(words), words_path)
 
+    layout = None
+    out_w, out_h = width, height
+    caption_bottom, hook_y = None, None
+    if args.vertical:
+        facecam = tuple(int(v) for v in args.facecam.split(",")) if args.facecam else None
+        layout, seam = vertical_layout(facecam, args.game_x)
+        out_w, out_h = VERTICAL_W, VERTICAL_H
+        # Captions in the upper-middle of the gameplay panel, clear of TikTok's
+        # buttons (right) and description (bottom); hook on the seam.
+        caption_bottom = (seam + 0.30 * (out_h - seam)) / out_h + 0.05
+        hook_y = seam if seam else int(out_h * 0.15)
     ass_path = args.output / f"{stem}.ass"
-    ass_path.write_text(build_ass(words, width, height, duration, args.max_words), encoding="utf-8")
+    ass_path.write_text(build_ass(words, out_w, out_h, duration, args.max_words,
+                                  caption_bottom=caption_bottom, hook=args.hook, hook_y=hook_y,
+                                  censor_words=args.censor),
+                        encoding="utf-8")
 
     logo = None
     if args.logo:
         logo = ca.LogoSpec(ca.fetch_logo(args.logo, args.output), args.logo_position,
-                           args.logo_width, args.logo_opacity, video_width=width)
+                           args.logo_width, args.logo_opacity, video_width=out_w)
     cover = tuple(int(v) for v in args.cover.split(",")) if args.cover else None
     dest = args.output / f"{stem}_captioned.mp4"
     log.info("Rendering %s ...", dest.name)
-    render(video, ass_path, dest, logo, cover)
+    render(video, ass_path, dest, logo, cover, layout)
     print(f"\n{dest.resolve()}")
     return 0
 

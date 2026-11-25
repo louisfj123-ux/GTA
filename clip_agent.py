@@ -66,7 +66,16 @@ STYLES = {
     # against the streamer's recent baseline so sudden yelling stands out.
     "hype": {"keywords": DEFAULT_KEYWORDS, "weights": (1.0, 1.0, 0.7), "relative_audio": False},
     "rage": {"keywords": RAGE_KEYWORDS, "weights": (0.3, 1.5, 1.0), "relative_audio": True},
+    "funny": {"keywords": None, "weights": (0.4, 1.6, 0.6), "relative_audio": True},
 }
+
+# Funny: chat laughing, not cheering ("W" spam is praise, not comedy).
+FUNNY_KEYWORDS = [
+    "lol", "lmao", "lmfao", "kekw", "omegalul", "lul", "lulw", "pepelaugh", "icant", "i cant", "i can't",
+    "dead", "im dead", "i'm dead", "crying", "bro what", "nah", "😂", "🤣", "💀", "😭",
+    r"re:\b(ha){2,}h?\b", r"re:\blo+l\b", r"re:\blmf?a+o+\b",
+]
+STYLES["funny"]["keywords"] = FUNNY_KEYWORDS
 
 AUDIO_RATE = 8000  # Hz; plenty for loudness and keeps the pipe small.
 
@@ -439,8 +448,13 @@ def video_motion(source: str, headers: dict | None = None, duration: float = 0,
 
 def gameplay_fraction(motion: np.ndarray, length: int, clip_len: float, lead: float) -> np.ndarray:
     """For each candidate peak second, the share of its clip window that is gameplay."""
+    return window_fraction(motion >= GAMEPLAY_THRESHOLD, length, clip_len, lead)
+
+
+def window_fraction(flags: np.ndarray, length: int, clip_len: float, lead: float) -> np.ndarray:
+    """For each candidate peak second, the share of its clip window where `flags` is true."""
     active = np.zeros(length)
-    m = motion[:length] >= GAMEPLAY_THRESHOLD
+    m = flags[:length]
     active[: m.size] = m
     csum = np.concatenate([[0.0], np.cumsum(active)])
     L = max(1, int(round(clip_len)))
@@ -725,6 +739,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     sel.add_argument("--weight-audio", type=float, help="Weight of loudness (default from --style)")
     sel.add_argument("--no-audio", action="store_true", help="Skip audio analysis (chat only)")
     sel.add_argument("--no-chat", action="store_true", help="Skip chat (audio only)")
+    sel.add_argument("--max-muted", type=float, default=0.1,
+                     help="Skip moments where more than this share of the clip's audio is muted by Twitch (default 0.1)")
     sel.add_argument("--min-gameplay", type=float, default=0.7,
                      help="Skip moments where less than this share of the clip is moving gameplay "
                           "(menus, loading and pause screens are static). 0 disables (default 0.7)")
@@ -811,12 +827,18 @@ def run(args: argparse.Namespace) -> list[Highlight]:
                 json.dumps([asdict(m) for m in msgs], ensure_ascii=False), encoding="utf-8")
 
     # 3. Audio ----------------------------------------------------------------
-    loudness = None
-    if not args.no_audio:
+    cache = out_dir / "signals.npz"
+    cached = dict(np.load(cache)) if cache.exists() else {}
+    loudness = cached.get("loudness")
+    if loudness is not None:
+        log.info("Using cached audio analysis from %s", cache)
+    if loudness is None and not args.no_audio:
         log.info("Analysing audio loudness ...")
         try:
             loudness = audio_loudness(audio_src, headers, meta["duration"])
             log.info("  %s of audio analysed", hms(loudness.size))
+            cached["loudness"] = loudness
+            np.savez(cache, **cached)
         except Exception as e:
             if not msgs:
                 raise
@@ -832,7 +854,13 @@ def run(args: argparse.Namespace) -> list[Highlight]:
     if args.min_gameplay > 0:
         log.info("Analysing on-screen motion (to skip menus and loading screens) ...")
         try:
-            motion = video_motion(motion_src, headers, duration)
+            motion = cached.get("motion")
+            if motion is None:
+                motion = video_motion(motion_src, headers, duration)
+                cached["motion"] = motion
+                np.savez(cache, **cached)
+            else:
+                log.info("  using cached motion analysis")
             gameplay = gameplay_fraction(motion, length, args.clip_length, args.lead)
             log.info("  %.0f%% of the VOD looks like gameplay",
                      100 * float((motion[:length] >= GAMEPLAY_THRESHOLD).mean()))
@@ -851,8 +879,12 @@ def run(args: argparse.Namespace) -> list[Highlight]:
 
     edge = args.skip_edges if length > 4 * args.skip_edges else 0
     pick_from = score
+    if loudness is not None and args.max_muted < 1:
+        # Twitch mutes copyrighted audio; a silent clip is useless.
+        muted = window_fraction(loudness < -60, length, args.clip_length, args.lead)
+        pick_from = np.where(muted <= args.max_muted, pick_from, -np.inf)
     if gameplay is not None:
-        pick_from = np.where(gameplay >= args.min_gameplay, score, -np.inf)
+        pick_from = np.where(gameplay >= args.min_gameplay, pick_from, -np.inf)
         if not np.isfinite(pick_from).any():
             log.warning("No moment has %.0f%% gameplay; ignoring --min-gameplay", 100 * args.min_gameplay)
             pick_from = score
