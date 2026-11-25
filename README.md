@@ -107,6 +107,16 @@ python caption_clip.py --video clip.mp4 --start 13 --end 40 --vertical --facecam
 
 Analysis results are cached in `signals.npz` in each VOD's output folder, so re-running `clip_agent.py` with different settings skips the slow audio and video passes.
 
+## Daily automation (`daily_hunt.py`, `daily_page.py`)
+
+A scheduled cloud session runs [`DAILY_RUN.md`](DAILY_RUN.md) every morning:
+
+1. `daily_hunt.py discover` finds the day's top English GTA 6 Twitch clips through Twitch's public GraphQL API (no API keys needed). They are ranked by views per hour, and clips already used are skipped.
+2. `daily_hunt.py prepare` downloads and transcribes each clip, finds the facecam (`facecam.py`), and writes review images.
+3. Claude reviews the candidates, rejecting nudity, non-gameplay, slur-heavy or dead clips. It picks 3 and writes their hooks and post captions.
+4. `daily_hunt.py render` makes the 9:16 videos. Clips without a reliable facecam use a blurred-background layout.
+5. `daily_page.py` rebuilds the private delivery page with save buttons, keeping the last 3 days.
+
 ## Network
 
 The agent needs to reach `www.twitch.tv`, `gql.twitch.tv`, `usher.ttvnw.net` and Twitch's VOD CDN hosts (`*.cloudfront.net` / `*.ttvnw.net`).

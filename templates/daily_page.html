@@ -1,0 +1,160 @@
+<title>Daily GTA 6 TikToks</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;900&family=Inter:wght@400;500;600&display=swap">
+<style>
+/* Layout: a daily posting queue — today's clips first, numbered in posting order; earlier days below. */
+:root {
+  --bg: #f3f1f6;
+  --surface: #ffffff;
+  --fg: #17141c;
+  --muted: #625b6e;
+  --line: #e2dde9;
+  --accent: #e0335f;
+  --accent-fg: #ffffff;
+  --ok: #1f8a54;
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121016; --surface: #1c1922; --fg: #f1eef5; --muted: #a59eb1;
+    --line: #2e2a36; --accent: #ff5b84; --accent-fg: #1a0b10; --ok: #4fcf8c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121016; --surface: #1c1922; --fg: #f1eef5; --muted: #a59eb1;
+  --line: #2e2a36; --accent: #ff5b84; --accent-fg: #1a0b10; --ok: #4fcf8c;
+  color-scheme: dark;
+}
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 48px;
+}
+.wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 28px; }
+header { display: grid; gap: 8px; max-width: 64ch; }
+.eyebrow { font: 600 12px/1 var(--body); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h1 { font: 900 clamp(28px, 6vw, 44px)/1.05 var(--display); margin: 0; letter-spacing: -.01em; text-wrap: balance; }
+h2.day { font: 800 22px/1.2 var(--display); margin: 0; }
+header p { margin: 0; color: var(--muted); }
+.how { margin: 4px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; color: var(--muted); font-size: 14px; }
+.how b { color: var(--fg); font-weight: 600; }
+section.daysec { display: grid; gap: 14px; }
+.grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 12px; display: grid; gap: 12px; align-content: start; min-width: 0; }
+.order { display: flex; align-items: baseline; gap: 10px; }
+.num { font: 900 13px/1 var(--display); color: var(--accent-fg); background: var(--accent); border-radius: 999px; padding: 5px 9px; font-variant-numeric: tabular-nums; }
+.title { font: 700 17px/1.2 var(--display); margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.meta { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.meta a { color: inherit; }
+video { width: 100%; max-width: 100%; aspect-ratio: 9 / 16; background: #000; border-radius: 10px; display: block; }
+.caption { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 14px; display: grid; gap: 8px; min-width: 0; }
+.caption span { overflow-wrap: anywhere; user-select: all; }
+button { font: 600 14px/1 var(--body); border-radius: 10px; padding: 12px 14px; cursor: pointer; border: 1px solid var(--line); background: var(--surface); color: var(--fg); }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); width: 100%; }
+button:disabled { opacity: .6; cursor: progress; }
+button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.small { padding: 8px 10px; font-size: 13px; justify-self: start; }
+.status { font-size: 13px; color: var(--muted); min-height: 1.2em; }
+.status.ok { color: var(--ok); }
+.empty { color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow" id="updated">Daily batch · 1080 × 1920</div>
+    <h1>Daily GTA 6 TikToks</h1>
+    <p>Each morning: the fastest-rising English GTA 6 clips on Twitch, checked, captioned and branded with the ClipUp logo. Post them in the order shown.</p>
+    <ul class="how">
+      <li><b>Save:</b> tap <b>Save video</b>, confirm, then pick <b>Save Video</b> (iPhone) or <b>Download</b> (Android).</li>
+      <li><b>Post:</b> TikTok → <b>+</b> → <b>Upload</b> → pick the video, then paste the copied caption.</li>
+    </ul>
+  </header>
+  <div id="days"></div>
+</div>
+
+<script type="application/json" id="state">/*STATE*/</script>
+<script>
+let STATE = { days: [], history: [] };
+try { STATE = JSON.parse(document.getElementById("state").textContent) || STATE; } catch {}
+let downloads = null;
+
+function el(tag, attrs = {}, text) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (text != null) e.textContent = text;
+  return e;
+}
+function niceDate(iso) {
+  const d = new Date(iso + "T12:00:00Z");
+  return d.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+}
+
+const daysEl = document.getElementById("days");
+if (STATE.updated) document.getElementById("updated").textContent = `Updated ${STATE.updated} · 1080 × 1920`;
+if (!STATE.days.length) daysEl.append(el("p", { class: "empty" }, "The first batch arrives tomorrow morning."));
+
+STATE.days.forEach((day, di) => {
+  const sec = el("section", { class: "daysec" });
+  sec.append(el("h2", { class: "day" }, di === 0 ? `Today · ${niceDate(day.date)}` : niceDate(day.date)));
+  const grid = el("div", { class: "grid" });
+  for (const c of day.clips) {
+    const id = `${day.date}-${c.n}`;
+    const card = el("article", { class: "card" });
+    const order = el("div", { class: "order" });
+    order.append(el("span", { class: "num" }, String(c.n)), el("h3", { class: "title" }, c.title));
+    const meta = el("div", { class: "meta" });
+    meta.append(`${c.streamer} · ${c.seconds}s · ${Number(c.views).toLocaleString()} views on Twitch · `);
+    if (/^https:\/\//.test(c.source_url || "")) {
+      const a = el("a", { href: c.source_url, target: "_blank", rel: "noopener" }, "original");
+      meta.append(a);
+    }
+    const video = el("video", { controls: "", playsinline: "", preload: di === 0 ? "metadata" : "none", src: c.url });
+    const cap = el("div", { class: "caption" });
+    const capText = el("span", {}, c.post_caption || "");
+    const copyBtn = el("button", { class: "small", type: "button", id: `copy-${id}` }, "Copy caption");
+    copyBtn.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(c.post_caption || ""); copyBtn.textContent = "Copied"; }
+      catch { const r = document.createRange(); r.selectNodeContents(capText); const s = getSelection(); s.removeAllRanges(); s.addRange(r); copyBtn.textContent = "Selected, copy it"; }
+      setTimeout(() => (copyBtn.textContent = "Copy caption"), 2000);
+    });
+    cap.append(capText, copyBtn);
+    const save = el("button", { class: "primary", type: "button", id: `save-${id}` }, "Save video");
+    const status = el("div", { class: "status", role: "status" });
+    save.addEventListener("click", () => saveClip(c, save, status));
+    card.append(order, meta, video, cap, save, status);
+    grid.append(card);
+  }
+  sec.append(grid);
+  daysEl.append(sec);
+});
+
+async function saveClip(c, btn, status) {
+  if (!downloads) { status.textContent = "Saving isn't available here. Open this page in your phone's browser, or long-press the playing video."; return; }
+  btn.disabled = true; status.className = "status"; status.textContent = "Getting the video…";
+  try {
+    const res = await fetch(c.url);
+    if (!res.ok) throw { code: "fetch" };
+    const blob = await res.blob();
+    status.textContent = "Confirm the save…";
+    await downloads.save({ filename: c.file, data: blob });
+    status.className = "status ok"; status.textContent = "Saved. Check your camera roll or Downloads.";
+  } catch (e) {
+    const code = e && e.code;
+    status.textContent =
+      code === "declined" ? "Save cancelled." :
+      code === "rate_limited" ? "Another save is still open. Finish it, then try again." :
+      code === "host_unavailable" ? "This app can't save files. Open this page in your phone's browser to save." :
+      code === "fetch" ? "Couldn't load the video. Check your connection and try again." :
+      "Saving isn't available here. Open this page in a browser, or long-press the playing video.";
+  } finally { btn.disabled = false; }
+}
+
+(async () => {
+  try { downloads = await window.claude?.use?.("downloads"); } catch { downloads = null; }
+})();
+</script>

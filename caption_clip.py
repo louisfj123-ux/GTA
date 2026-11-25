@@ -177,7 +177,7 @@ VERTICAL_W, VERTICAL_H = 1080, 1920
 
 
 def vertical_layout(facecam: tuple[int, int, int, int] | None, game_x: float = 0.5,
-                    bars: int = 60) -> tuple[str, int]:
+                    bars: int = 60, fill: str = "crop") -> tuple[str, int]:
     """Filter turning a 1920x1080 input [0:v] into 1080x1920 [stack]: facecam on top, gameplay below.
 
     Returns the filter and the y of the seam between the two panels.
@@ -196,6 +196,15 @@ def vertical_layout(facecam: tuple[int, int, int, int] | None, game_x: float = 0
              f"[b]crop={cw}:{gh}:{cx}:{bars},scale={W}:{game_h}:flags=lanczos[game];"
              f"[cam][game]vstack[stack]")
         return f, cam_h
+    if fill == "blur":
+        # No facecam: the whole 16:9 video centred over a blurred, zoomed copy of itself.
+        fg_h = int(round(W * 9 / 16 / 2)) * 2
+        top = (H - fg_h) // 2
+        f = (f"[0:v]scale=1920:1080,setsar=1,split[a][b];"
+             f"[a]scale=-2:{H},crop={W}:{H},boxblur=24:2,eq=brightness=-0.10[bg];"
+             f"[b]scale={W}:{fg_h}:flags=lanczos[fg];"
+             f"[bg][fg]overlay=0:{top}[stack]")
+        return f, top
     # No facecam: gameplay crop filling the frame.
     cw = int(round(1080 * W / H / 2)) * 2
     cx = int(round((1920 - cw) * game_x))
@@ -245,6 +254,8 @@ def main(argv=None) -> int:
     p.add_argument("--end", type=float, help="Trim: end time in seconds")
     p.add_argument("--vertical", action="store_true", help="9:16 TikTok/Shorts layout (1080x1920)")
     p.add_argument("--facecam", help="x,y,w,h of the facecam in the 1920x1080 source; placed on top in --vertical")
+    p.add_argument("--fill", choices=["crop", "blur"], default="crop",
+                   help="Vertical without --facecam: crop the gameplay (crop) or show all of it over a blurred copy (blur)")
     p.add_argument("--game-x", type=float, default=0.5, help="Horizontal centre of the gameplay crop, 0-1 (default 0.5)")
     p.add_argument("--hook", help="Title text shown in a box for the whole clip (e.g. 'Kai got kicked out the club')")
     p.add_argument("--name", help="Output file name (without .mp4)")
@@ -293,7 +304,7 @@ def main(argv=None) -> int:
     caption_bottom, hook_y = None, None
     if args.vertical:
         facecam = tuple(int(v) for v in args.facecam.split(",")) if args.facecam else None
-        layout, seam = vertical_layout(facecam, args.game_x)
+        layout, seam = vertical_layout(facecam, args.game_x, fill=args.fill)
         out_w, out_h = VERTICAL_W, VERTICAL_H
         # Captions in the upper-middle of the gameplay panel, clear of TikTok's
         # buttons (right) and description (bottom); hook on the seam.
