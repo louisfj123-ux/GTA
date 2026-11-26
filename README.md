@@ -112,6 +112,7 @@ Analysis results are cached in `signals.npz` in each VOD's output folder, so re-
 A scheduled cloud session runs [`DAILY_RUN.md`](DAILY_RUN.md) every morning:
 
 1. `daily_hunt.py discover` finds the day's top English GTA 6 Twitch clips through Twitch's public GraphQL API (no API keys needed). They are ranked by views per hour, and clips already used are skipped.
+   With `--channels watchlists/celebrities.txt` it looks only at a watchlist of famous streamers and celebrities.
 2. `daily_hunt.py prepare` downloads and transcribes each clip, finds the facecam (`facecam.py`), and writes review images.
 3. Claude reviews the candidates, rejecting nudity, non-gameplay, slur-heavy or dead clips. It picks 3 and writes their hooks and post captions.
 4. `daily_hunt.py render` makes the 9:16 videos. Clips without a reliable facecam use a blurred-background layout.

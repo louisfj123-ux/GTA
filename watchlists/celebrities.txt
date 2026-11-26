@@ -1,0 +1,24 @@
+# Twitch logins for --channels. Famous streamers who play GTA 6, plus mainstream
+# celebrities with Twitch channels (picked up whenever they stream GTA 6).
+# Famous streamers
+xqc
+kaicenat
+ishowspeed
+adinross
+lacy
+fanum
+jasontheween
+plaqueboymax
+agent00
+tfue
+jynxzi
+ninja
+duke
+# Musicians and other celebrities with Twitch channels
+snoopdogg
+postmalone
+drake
+ddg
+lilyachty
+21savage
+lildurk

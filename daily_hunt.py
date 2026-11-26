@@ -57,6 +57,31 @@ CLIPS_QUERY = """query($game: String!, $first: Int!, $period: ClipsPeriod!) {
 }"""
 
 
+CHANNEL_CLIPS_QUERY = """query($login: String!, $period: ClipsPeriod!) {
+  user(login: $login) {
+    clips(first: 50, criteria: {period: $period, sort: VIEWS_DESC}) {
+      edges { node {
+        slug title viewCount createdAt durationSeconds language url
+        broadcaster { login displayName }
+        game { name }
+        video { id } videoOffsetSeconds
+      } }
+    }
+  }
+}"""
+
+
+def read_channels(spec: str) -> list[str]:
+    """Comma-separated logins, or a path to a file with one login per line (# comments)."""
+    path = Path(spec)
+    if not path.exists() and (ROOT / spec).exists():
+        path = ROOT / spec
+    if path.exists():
+        lines = path.read_text().splitlines()
+        return [l.split("#")[0].strip().lower() for l in lines if l.split("#")[0].strip()]
+    return [c.strip().lower() for c in spec.split(",") if c.strip()]
+
+
 def gql_query(query: str, variables: dict, attempts: int = 5) -> dict:
     """Twitch's GQL sometimes answers "service error"; retry with backoff."""
     import time
@@ -76,8 +101,22 @@ def discover(args) -> None:
     if args.history and Path(args.history).exists():
         history = set(json.loads(Path(args.history).read_text()))
 
-    data = gql_query(CLIPS_QUERY, {"game": args.game, "first": 100, "period": args.period})
-    edges = ((data.get("game") or {}).get("clips") or {}).get("edges") or []
+    if args.channels:
+        # Watchlist mode: each channel's top clips, kept only if they are of this game.
+        edges = []
+        for login in read_channels(args.channels):
+            try:
+                data = gql_query(CHANNEL_CLIPS_QUERY, {"login": login, "period": args.period})
+            except RuntimeError as e:
+                print(f"  {login}: skipped ({e})")
+                continue
+            for e in (((data.get("user") or {}).get("clips") or {}).get("edges") or []):
+                if ((e["node"].get("game") or {}).get("name") or "") == args.game:
+                    edges.append(e)
+        print(f"{len(edges)} {args.game} clips from {len(read_channels(args.channels))} channels")
+    else:
+        data = gql_query(CLIPS_QUERY, {"game": args.game, "first": 100, "period": args.period})
+        edges = ((data.get("game") or {}).get("clips") or {}).get("edges") or []
     now = dt.datetime.now(dt.timezone.utc)
     langs = {l.strip().upper() for l in args.languages.split(",")}
     out, per_streamer = [], {}
@@ -239,6 +278,8 @@ def main(argv=None) -> int:
     d.add_argument("--work", required=True)
     d.add_argument("--history", help="JSON list of clip slugs already used")
     d.add_argument("--game", default="Grand Theft Auto VI")
+    d.add_argument("--channels", help="Only these channels: comma-separated logins or a file "
+                                      "(e.g. watchlists/celebrities.txt)")
     d.add_argument("--period", default="LAST_DAY", choices=["LAST_DAY", "LAST_WEEK", "LAST_MONTH", "ALL_TIME"])
     d.add_argument("--languages", default="EN")
     d.add_argument("--n", type=int, default=8, help="Candidates to prepare (default 8)")

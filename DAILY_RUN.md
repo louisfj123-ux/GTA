@@ -36,6 +36,11 @@ python daily_hunt.py discover --work work/<date> --history work/<date>/history.j
 python daily_hunt.py prepare  --work work/<date>
 ```
 
+**Celebrity mode** (when the task's prompt asks for it): add
+`--channels watchlists/celebrities.txt --period LAST_WEEK` to discover. It looks only at
+famous streamers and celebrities with Twitch channels; clips already used are still skipped.
+In hooks and post captions, name the celebrity (e.g. "xQc can't believe this", `#xqc`).
+
 If discover finds fewer than 4 candidates, run it again with `--period LAST_WEEK`.
 Discover retries Twitch's occasional "service error" by itself; if it still fails, wait a minute and run it again.
 
